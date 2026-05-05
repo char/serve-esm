@@ -1,0 +1,12 @@
+{
+  "tasks": {
+    "dev": "deno serve --watch --allow-env --allow-read --allow-run=git src/main.ts",
+    "start": "deno serve --allow-env --allow-read --allow-run=git src/main.ts",
+    "test": "deno test --allow-read --allow-write --allow-run=git tests/"
+  },
+  "imports": {
+    "@char/ngx": "jsr:@char/ngx@^0.2.2",
+    "@std/assert": "jsr:@std/assert@^1.0.0",
+    "@std/path": "jsr:@std/path@^1.1.4"
+  }
+}
