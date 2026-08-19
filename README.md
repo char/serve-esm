@@ -11,6 +11,7 @@
 - if version tag not found in repo, return 404 with text/plain "version not
   found" followed by the list of available tags (newest-first, by version sort)
 - return successful responses with a public + 1 year + immutable Cache-Control
-  header
+  header and a strong ETag derived from the Git blob ID
+- honor If-None-Match with a 304 response
 - succesful responses should mostly have text/javascript or text/typescript MIME
   types

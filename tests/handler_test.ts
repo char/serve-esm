@@ -1,4 +1,9 @@
-import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertMatch,
+  assertStringIncludes,
+} from "jsr:@std/assert";
 import * as path from "@std/path";
 import { createHandler } from "../src/handler.ts";
 
@@ -83,6 +88,10 @@ Deno.test("handler", async (t) => {
       "public, max-age=31536000, immutable",
     );
     assertEquals(res.headers.get("content-length"), "20");
+    assertMatch(
+      res.headers.get("etag") ?? "",
+      /^"(?:[0-9a-f]{40}|[0-9a-f]{64})"$/,
+    );
     assertEquals(await res.text(), "export const x = 1;\n");
   });
 
@@ -99,6 +108,43 @@ Deno.test("handler", async (t) => {
     assertEquals(res.status, 200);
     assertEquals(res.headers.get("content-length"), "20");
     assertEquals((await res.arrayBuffer()).byteLength, 0);
+  });
+
+  await t.step(
+    "If-None-Match returns 304 for strong and weak matches",
+    async () => {
+      const initial = await handler(
+        new Request("http://x/lib/v1.0.0/mod.ts"),
+      );
+      const etag = initial.headers.get("etag");
+      assert(etag);
+
+      for (const value of [etag, `"unrelated", W/${etag}`]) {
+        const res = await handler(
+          new Request("http://x/lib/v1.0.0/mod.ts", {
+            headers: { "if-none-match": value },
+          }),
+        );
+        assertEquals(res.status, 304);
+        assertEquals(res.headers.get("etag"), etag);
+        assertEquals(
+          res.headers.get("cache-control"),
+          "public, max-age=31536000, immutable",
+        );
+        assertEquals(res.headers.get("content-length"), null);
+        assertEquals((await res.arrayBuffer()).byteLength, 0);
+      }
+    },
+  );
+
+  await t.step("If-None-Match wildcard returns 304 for HEAD", async () => {
+    const res = await handler(
+      new Request("http://x/lib/v1.0.0/mod.ts", {
+        method: "HEAD",
+        headers: { "if-none-match": "*" },
+      }),
+    );
+    assertEquals(res.status, 304);
   });
 
   await t.step("405 for non-GET/HEAD methods", async () => {

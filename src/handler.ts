@@ -6,6 +6,7 @@ const GET_VERSIONED_FILE = new URLPattern({
 });
 
 const decoder = new TextDecoder();
+const CACHE_CONTROL = "public, max-age=31536000, immutable";
 
 interface GitResult {
   code: number;
@@ -23,19 +24,11 @@ async function git(repoDir: string, args: string[]): Promise<GitResult> {
   return { code, stdout, stderr: decoder.decode(stderr) };
 }
 
-// git's "this object/path isn't here" failure modes, distinct from
-// "git itself is unhappy" (corrupt repo, OOM, permissions, ...). The
-// latter should surface as 5xx so we notice in logs.
-function isGitNotFound(stderr: string): boolean {
-  return /Not a valid object name|does not exist in|exists on disk, but not in/
-    .test(stderr);
-}
-
 function logGitFailure(where: string, args: string[], r: GitResult): void {
   console.warn(
-    `git ${where} failed (code ${r.code}): ${args.join(" ")}\n${
-      r.stderr.trimEnd()
-    }`,
+    `git ${where} failed (code ${r.code}): ${
+      args.join(" ")
+    }\n${r.stderr.trimEnd()}`,
   );
 }
 
@@ -102,39 +95,65 @@ async function getVersionedFile(
   if (tags === null) return textPlain(500, "internal error");
   if (!tags.includes(version)) {
     const list = tags.length === 0 ? "(no tags)" : tags.join("\n");
-    return textPlain(404, `version not found\n\navailable versions:\n${list}\n`);
+    return textPlain(
+      404,
+      `version not found\n\navailable versions:\n${list}\n`,
+    );
   }
 
-  // tag is now known-safe. Check object type before fetching content so a
-  // tree (i.e. a directory request) becomes a 404 rather than a 500.
-  const ref = `refs/tags/${version}:${file}`;
-  const typeArgs = ["cat-file", "-t", ref];
-  const typeRes = await git(repoDir, typeArgs);
-  if (typeRes.code !== 0) {
-    if (!isGitNotFound(typeRes.stderr)) {
-      logGitFailure("cat-file -t", typeArgs, typeRes);
-      return textPlain(500, "internal error");
-    }
-    return textPlain(404, "file not found");
-  }
-  if (decoder.decode(typeRes.stdout).trim() !== "blob") {
-    return textPlain(404, "file not found");
-  }
-
-  const blobArgs = ["cat-file", "blob", ref];
-  const blob = await git(repoDir, blobArgs);
-  if (blob.code !== 0) {
-    logGitFailure("cat-file blob", blobArgs, blob);
+  // Get the blob ID and size without reading its contents. Besides making the
+  // object ID available as an ETag, this avoids loading the blob for HEAD and
+  // conditional requests.
+  const infoArgs = [
+    "--literal-pathspecs",
+    "ls-tree",
+    "-z",
+    "--format=%(objectname) %(objecttype) %(objectsize)",
+    `refs/tags/${version}`,
+    "--",
+    file,
+  ];
+  const info = await git(repoDir, infoArgs);
+  if (info.code !== 0) {
+    logGitFailure("ls-tree", infoArgs, info);
     return textPlain(500, "internal error");
+  }
+  const blobInfo = decoder.decode(info.stdout).match(
+    /^([0-9a-f]+) blob ([0-9]+)\0$/,
+  );
+  if (blobInfo === null) return textPlain(404, "file not found");
+
+  const [, objectId, size] = blobInfo;
+  const etag = `"${objectId}"`;
+  const ifNoneMatch = req.headers.get("if-none-match");
+  if (
+    ifNoneMatch !== null &&
+    ifNoneMatch.split(",").some((candidate) => {
+      const tag = candidate.trim();
+      return tag === "*" || tag === etag || tag === `W/${etag}`;
+    })
+  ) {
+    return new Response(null, {
+      status: 304,
+      headers: { "cache-control": CACHE_CONTROL, etag },
+    });
   }
 
   const headers = {
     "content-type": getMimeType(file) ?? "application/octet-stream",
-    "content-length": String(blob.stdout.byteLength),
-    "cache-control": "public, max-age=31536000, immutable",
+    "content-length": size,
+    "cache-control": CACHE_CONTROL,
+    etag,
   };
   if (req.method === "HEAD") {
     return new Response(null, { status: 200, headers });
+  }
+
+  const blobArgs = ["cat-file", "blob", objectId];
+  const blob = await git(repoDir, blobArgs);
+  if (blob.code !== 0) {
+    logGitFailure("cat-file blob", blobArgs, blob);
+    return textPlain(500, "internal error");
   }
   // Deno typings give us Uint8Array<ArrayBufferLike>; BodyInit wants the
   // narrower Uint8Array<ArrayBuffer>. The buffer is in fact an ArrayBuffer.
