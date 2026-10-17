@@ -1,4 +1,5 @@
-import * as path from "@std/path";
+import * as path from "avril:path";
+import { run, stat } from "avril:std";
 import { getMimeType } from "./mime.ts";
 
 const GET_VERSIONED_FILE = new URLPattern({
@@ -15,13 +16,15 @@ interface GitResult {
 }
 
 async function git(repoDir: string, args: string[]): Promise<GitResult> {
-  const cmd = new Deno.Command("git", {
+  const result = await run("git", {
     args: ["-C", repoDir, ...args],
-    stdout: "piped",
-    stderr: "piped",
+    check: false,
   });
-  const { code, stdout, stderr } = await cmd.output();
-  return { code, stdout, stderr: decoder.decode(stderr) };
+  return {
+    code: result.code ?? 1,
+    stdout: result.stdout ?? new Uint8Array(),
+    stderr: decoder.decode(result.stderr ?? new Uint8Array()),
+  };
 }
 
 function logGitFailure(where: string, args: string[], r: GitResult): void {
@@ -78,12 +81,12 @@ async function getVersionedFile(
   }
 
   const repoDir = path.resolve(root, repo);
-  if (repoDir !== root && !repoDir.startsWith(root + path.SEPARATOR)) {
+  if (repoDir !== root && !repoDir.startsWith(root + path.sep)) {
     return textPlain(404, "repository not found");
   }
   try {
-    const stat = await Deno.stat(repoDir);
-    if (!stat.isDirectory) return textPlain(404, "repository not found");
+    const info = await stat(repoDir);
+    if (!info.isDirectory) return textPlain(404, "repository not found");
   } catch {
     return textPlain(404, "repository not found");
   }
@@ -155,8 +158,6 @@ async function getVersionedFile(
     logGitFailure("cat-file blob", blobArgs, blob);
     return textPlain(500, "internal error");
   }
-  // Deno typings give us Uint8Array<ArrayBufferLike>; BodyInit wants the
-  // narrower Uint8Array<ArrayBuffer>. The buffer is in fact an ArrayBuffer.
   return new Response(blob.stdout as Uint8Array<ArrayBuffer>, {
     status: 200,
     headers,

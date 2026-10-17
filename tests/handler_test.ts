@@ -4,31 +4,33 @@ import {
   assertMatch,
   assertStringIncludes,
 } from "jsr:@std/assert";
-import * as path from "@std/path";
+import { test } from "avril:test";
+import { makeTempDir, mkdirs, writeTextFile } from "avril:fs";
+import { remove, run } from "avril:std";
+import * as path from "avril:path";
 import { createHandler } from "../src/handler.ts";
 
-async function run(cmd: string, args: string[], cwd?: string): Promise<void> {
-  const r = await new Deno.Command(cmd, {
-    args,
-    cwd,
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  if (r.code !== 0) {
+const decoder = new TextDecoder();
+
+async function git(args: string[], cwd?: string): Promise<void> {
+  const result = await run("git", { args, cwd, check: false });
+  if (!result.success) {
     throw new Error(
-      `${cmd} ${args.join(" ")} failed: ${new TextDecoder().decode(r.stderr)}`,
+      `git ${args.join(" ")} failed: ${
+        decoder.decode(result.stderr ?? new Uint8Array())
+      }`,
     );
   }
 }
 
 async function tempDir(
-  opts?: Deno.MakeTempOptions,
+  options?: { prefix?: string },
 ): Promise<{ path: string } & AsyncDisposable> {
-  const path = await Deno.makeTempDir(opts);
+  const path = await makeTempDir(options);
   return {
     path,
     async [Symbol.asyncDispose]() {
-      await Deno.remove(path, { recursive: true });
+      await remove(path, { recursive: true });
     },
   };
 }
@@ -39,8 +41,8 @@ async function makeRepo(
   tags: Record<string, Record<string, string>>,
 ): Promise<void> {
   const dir = path.join(parent, name);
-  await Deno.mkdir(dir, { recursive: true });
-  await run("git", ["init", "-q", "-b", "main"], dir);
+  await mkdirs(dir);
+  await git(["init", "-q", "-b", "main"], dir);
   // pin identity / disable signing so tests don't depend on global git config
   for (
     const [k, v] of [
@@ -50,21 +52,21 @@ async function makeRepo(
       ["tag.gpgsign", "false"],
     ]
   ) {
-    await run("git", ["config", k, v], dir);
+    await git(["config", k, v], dir);
   }
   for (const [tag, files] of Object.entries(tags)) {
     for (const [p, content] of Object.entries(files)) {
       const full = path.join(dir, p);
-      await Deno.mkdir(path.dirname(full), { recursive: true });
-      await Deno.writeTextFile(full, content);
+      await mkdirs(path.dirname(full));
+      await writeTextFile(full, content);
     }
-    await run("git", ["add", "."], dir);
-    await run("git", ["commit", "-q", "-m", tag], dir);
-    await run("git", ["tag", tag], dir);
+    await git(["add", "."], dir);
+    await git(["commit", "-q", "-m", tag], dir);
+    await git(["tag", tag], dir);
   }
 }
 
-Deno.test("handler", async (t) => {
+test("handler", async (t) => {
   await using tmp = await tempDir({ prefix: "serve-esm-test-" });
   await makeRepo(tmp.path, "lib", {
     "v1.0.0": { "mod.ts": "export const x = 1;\n" },
